@@ -49,6 +49,12 @@ type RecentProfessional = {
   age: number | null;
 };
 
+type RecentProfessionalsResponse = {
+  items?: unknown;
+  professionals?: unknown;
+  data?: unknown;
+};
+
 /* ── Helpers ── */
 
 function kindLabel(kind: Category["kind"]) {
@@ -182,6 +188,32 @@ const cardFade = {
 
 const SANTIAGO_FALLBACK: [number, number] = [-33.45, -70.66];
 
+function normalizeRecentList(payload: unknown): unknown[] {
+  const data = payload as RecentProfessionalsResponse | unknown[] | null | undefined;
+  const list =
+    (data as RecentProfessionalsResponse | null | undefined)?.items ??
+    (data as RecentProfessionalsResponse | null | undefined)?.professionals ??
+    (data as RecentProfessionalsResponse | null | undefined)?.data ??
+    (Array.isArray(data) ? data : []);
+
+  return Array.isArray(list) ? list : [];
+}
+
+function mapRecentProfessionals(list: unknown[]): RecentProfessional[] {
+  return list
+    .map((entry) => {
+      const p = entry as Record<string, unknown> | null;
+      const id = typeof p?.id === "string" ? p.id : String(p?.id ?? "");
+      const name = typeof p?.name === "string" && p.name.trim() ? p.name : "Experiencia";
+      const avatarUrl = typeof p?.avatarUrl === "string" && p.avatarUrl.trim() ? p.avatarUrl : null;
+      const distance = typeof p?.distance === "number" ? p.distance : null;
+      const age = typeof p?.age === "number" ? p.age : null;
+
+      return { id, name, avatarUrl, distance, age };
+    })
+    .filter((p) => Boolean(p.id));
+}
+
 export default function HomePage() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [banners, setBanners] = useState<Banner[]>([]);
@@ -232,56 +264,34 @@ export default function HomePage() {
     setRecentError(null);
 
     const timer = setTimeout(() => {
-      apiFetch<{ professionals: any[] }>(`/professionals/recent?${query}`, {
-        signal: controller.signal,
-      })
-        .then((res) => {
-          // DEBUG: Log raw API response
-          console.log('[HomePage DEBUG] Raw API response:', {
-            count: res?.professionals?.length || 0,
-            sample: res?.professionals?.[0]
+      (async () => {
+        try {
+          const res = await apiFetch<RecentProfessionalsResponse | unknown[]>(`/professionals/recent?${query}`, {
+            signal: controller.signal,
           });
 
-          // Filter out professionals without avatars (defense-in-depth)
-          const mapped: RecentProfessional[] = (res?.professionals || [])
-            .filter(p => {
-              if (!p.avatarUrl || p.avatarUrl.trim() === '') {
-                console.warn('[HomePage] Filtering professional without avatar:', p.id);
-                return false;
-              }
-              return true;
-            })
-            .map((p) => ({
-              id: p.id,
-              name: p.name || "Experiencia",
-              avatarUrl: p.avatarUrl,
-              distance: typeof p.distance === "number" ? p.distance : null,
-              age: typeof p.age === "number" ? p.age : null,
-            }));
+          let list = normalizeRecentList(res);
 
-          // DEBUG: Log processed data and resolved URLs
-          console.log(`[HomePage] Loaded ${mapped.length} professionals`);
-          if (mapped.length > 0) {
-            const firstPro = mapped[0];
-            console.log('[HomePage DEBUG] First professional:', {
-              id: firstPro.id,
-              name: firstPro.name,
-              rawAvatarUrl: firstPro.avatarUrl,
-              resolvedUrl: resolveMediaUrl(firstPro.avatarUrl)
+          if (!list.length && location) {
+            const fallback = await apiFetch<RecentProfessionalsResponse | unknown[]>("/professionals/recent?limit=6", {
+              signal: controller.signal,
             });
+            list = normalizeRecentList(fallback);
           }
 
-          setRecentPros(mapped);
-        })
-        .catch((err: any) => {
+          setRecentPros(mapRecentProfessionals(list));
+        } catch (err: any) {
           if (err?.name === "AbortError") return;
           if (err?.status === 429) {
             setRecentError("Estamos recibiendo muchas solicitudes. Reintenta en unos segundos.");
             return;
           }
           setRecentError("No se pudieron cargar experiencias recientes.");
-        })
-        .finally(() => setRecentLoading(false));
+          setRecentPros([]);
+        } finally {
+          setRecentLoading(false);
+        }
+      })();
     }, 150);
 
     return () => {
@@ -466,8 +476,8 @@ export default function HomePage() {
           )}
 
           <div className="grid gap-3 sm:grid-cols-2 sm:gap-4 md:grid-cols-3">
-            {recentPros.length > 0
-              ? recentPros.slice(0, 6).map((p, i) => (
+            {Array.isArray(recentPros) && recentPros.length > 0
+              ? recentPros.slice(0, 6).map((p) => (
                   <motion.div key={p.id} variants={cardFade}>
                     <Link
                       href={`/profesional/${p.id}`}
@@ -477,24 +487,11 @@ export default function HomePage() {
                       <div className="relative aspect-[4/5] overflow-hidden bg-gradient-to-br from-white/5 to-transparent">
                         {p.avatarUrl ? (
                           <img
-                            src={(() => {
-                              const url = resolveMediaUrl(p.avatarUrl);
-                              console.log('[RecentPro Card]', {
-                                id: p.id,
-                                name: p.name,
-                                rawUrl: p.avatarUrl,
-                                resolvedUrl: url
-                              });
-                              return url ?? undefined;
-                            })()}
+                            src={resolveMediaUrl(p.avatarUrl) ?? undefined}
                             alt={p.name}
                             className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.06]"
-                            onLoad={() => {
-                              console.log('[RecentPro Card] ✅ Image loaded successfully for:', p.name);
-                            }}
                             onError={(e) => {
                               const img = e.currentTarget as HTMLImageElement;
-                              console.error('[RecentPro Card] ❌ Image load failed for:', p.name, 'URL:', img.src);
                               img.onerror = null;
                               img.src = "/brand/isotipo-new.png";
                               img.className = "h-20 w-20 mx-auto mt-20 opacity-40";
